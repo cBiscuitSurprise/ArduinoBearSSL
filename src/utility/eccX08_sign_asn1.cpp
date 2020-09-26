@@ -25,6 +25,7 @@
 
 #include "eccX08_asn1.h"
 
+#ifndef ARDUINO_BEARSSL_NO_ECCX08
 #include <ArduinoECCX08.h>
 
 #define BR_MAX_EC_SIZE   528
@@ -51,3 +52,4 @@ eccX08_sign_asn1(const br_ec_impl * /*impl*/,
   memcpy(sig, rsig, sig_len);
   return sig_len;
 }
+#endif

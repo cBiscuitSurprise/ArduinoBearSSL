@@ -22,11 +22,16 @@
  * SOFTWARE.
  */
 
+#ifndef ARDUINO_BEARSSL_NO_ECCX08
 #include <ArduinoECCX08.h>
+#endif
 
 #include "ArduinoBearSSL.h"
 #include "BearSSLTrustAnchors.h"
+
+#ifndef ARDUINO_BEARSSL_NO_ECCX08
 #include "utility/eccX08_asn1.h"
+#endif
 
 #include "BearSSLClient.h"
 
@@ -44,7 +49,8 @@ BearSSLClient::BearSSLClient(Client* client, const br_x509_trust_anchor* myTAs, 
   _client(client),
   _TAs(myTAs),
   _numTAs(myNumTAs),
-  _noSNI(false)
+  _noSNI(false),
+  _keyType(0)
 {
   _ecVrfy = br_ecdsa_vrfy_asn1_get_default();
   _ecSign = br_ecdsa_sign_asn1_get_default();
@@ -212,6 +218,7 @@ void BearSSLClient::setEccCert(br_x509_certificate cert)
 
 void BearSSLClient::setEccSlot(int ecc508KeySlot, const byte cert[], int certLength)
 {
+#ifndef ARDUINO_BEARSSL_NO_ECCX08
   // HACK: put the key slot info. in the br_ec_private_key structure
   _ecKey.curve = 23;
   _ecKey.x = (unsigned char*)ecc508KeySlot;
@@ -223,53 +230,92 @@ void BearSSLClient::setEccSlot(int ecc508KeySlot, const byte cert[], int certLen
 
   _ecVrfy = eccX08_vrfy_asn1;
   _ecSign = eccX08_sign_asn1;
+#else
+  // Should probably warn here somehow
+#endif
 }
 
 void BearSSLClient::setEccSlot(int ecc508KeySlot, const char cert[])
 {
-  // try to decode the cert
-  br_pem_decoder_context pemDecoder;
-
-  size_t certLen = strlen(cert);
-
-  // free old data
-  if (_ecCertDynamic && _ecCert.data) {
-    free(_ecCert.data);
-    _ecCert.data = NULL;
+  if (decodePem(cert, &_ecCert) == 0) {
+    setEccSlot(ecc508KeySlot, _ecCert.data, _ecCert.data_len);
+    _ecCertDynamic = true;
+  } else {
+    setEccSlot(ecc508KeySlot, NULL, 0);
   }
+}
 
-  // assume the decoded cert is 3/4 the length of the input
-  _ecCert.data = (unsigned char*)malloc(((certLen * 3) + 3) / 4);
-  _ecCert.data_len = 0;
+void BearSSLClient::setClientCertPem(const char cert[])
+{
+  if (decodePem(cert, &_clientCert) == 0) {
+    _ecCertDynamic = true;
+  } else {
+    _clientCert.data = NULL;
+    _clientCert.data_len = 0;
+  }
+}
 
-  br_pem_decoder_init(&pemDecoder);
+void BearSSLClient::setClientKeyPem(const char key[])
+{
+  br_x509_certificate tempCert;
+  if (decodePem(key, &tempCert) == 0) {
+    br_skey_decoder_context keyDecoder;
+    br_skey_decoder_init(&keyDecoder);
+    br_skey_decoder_push(&keyDecoder, tempCert.data, tempCert.data_len);
 
-  while (certLen) {
-    size_t len = br_pem_decoder_push(&pemDecoder, cert, certLen);
+#ifdef DEBUGSERIAL
+    DEBUGSERIAL.print("BearSSLClient::setClientKeyPem - ");
+    DEBUGSERIAL.print("decoded key");
+#endif
 
-    cert += len;
-    certLen -= len;
+    _keyType = br_skey_decoder_key_type(&keyDecoder);
+    if (_keyType == BR_KEYTYPE_EC) {
+      const br_ec_private_key* tempEcKey = br_skey_decoder_get_ec(&keyDecoder);
 
-    switch (br_pem_decoder_event(&pemDecoder)) {
-      case BR_PEM_BEGIN_OBJ:
-        br_pem_decoder_setdest(&pemDecoder, BearSSLClient::clientAppendCert, this);
-        break;
+      _ecKey.curve = tempEcKey->curve;
+      _ecKey.x = (unsigned char*)malloc(tempEcKey->xlen);
+      memcpy(_ecKey.x, tempEcKey->x, tempEcKey->xlen);
+      _ecKey.xlen = tempEcKey->xlen;
 
-      case BR_PEM_END_OBJ:
-        if (_ecCert.data_len) {
-          // done
-          setEccSlot(ecc508KeySlot, _ecCert.data, _ecCert.data_len);
-          _ecCertDynamic = true;
-          return;
-        }
-        break;
+#ifdef DEBUGSERIAL
+      DEBUGSERIAL.println(" (EC)");
+#endif
+    } else {
+      const br_rsa_private_key* tempRsaKey = br_skey_decoder_get_rsa(&keyDecoder);
 
-      case BR_PEM_ERROR:
-        // failure
-        free(_ecCert.data);
-        setEccSlot(ecc508KeySlot, NULL, 0);
-        return;
+      _rsaKey.p = (unsigned char*)malloc(tempRsaKey->plen);
+      memcpy(_rsaKey.p, tempRsaKey->p, tempRsaKey->plen);
+      _rsaKey.plen = tempRsaKey->plen;
+
+      _rsaKey.q = (unsigned char*)malloc(tempRsaKey->qlen);
+      memcpy(_rsaKey.q, tempRsaKey->q, tempRsaKey->qlen);
+      _rsaKey.qlen = tempRsaKey->qlen;
+
+      _rsaKey.dp = (unsigned char*)malloc(tempRsaKey->dplen);
+      memcpy(_rsaKey.dp, tempRsaKey->dp, tempRsaKey->dplen);
+      _rsaKey.dplen = tempRsaKey->dplen;
+
+      _rsaKey.dq = (unsigned char*)malloc(tempRsaKey->dqlen);
+      memcpy(_rsaKey.dq, tempRsaKey->dq, tempRsaKey->dqlen);
+      _rsaKey.dqlen = tempRsaKey->dqlen;
+
+      _rsaKey.iq = (unsigned char*)malloc(tempRsaKey->iqlen);
+      memcpy(_rsaKey.iq, tempRsaKey->iq, tempRsaKey->iqlen);
+      _rsaKey.iqlen = tempRsaKey->iqlen;
+
+      _rsaKey.n_bitlen = tempRsaKey->n_bitlen;
+
+#ifdef DEBUGSERIAL
+      DEBUGSERIAL.println(" (RSA)");
+#endif
     }
+    free(tempCert.data);
+  } else {
+#ifdef DEBUGSERIAL
+    DEBUGSERIAL.print("BearSSLClient::setClientKeyPem - ");
+    DEBUGSERIAL.print("failed to set key: ");
+    DEBUGSERIAL.println(errorCode());
+#endif
   }
 }
 
@@ -288,21 +334,31 @@ int BearSSLClient::connectSSL(const char* host)
   // inject entropy in engine
   unsigned char entropy[32];
 
+#ifndef ARDUINO_BEARSSL_NO_ECCX08
   if (!ECCX08.begin() || !ECCX08.locked() || !ECCX08.random(entropy, sizeof(entropy))) {
     // no ECCX08 or random failed, fallback to pseudo random
+#endif
     for (size_t i = 0; i < sizeof(entropy); i++) {
       entropy[i] = random(0, 255);
     }
+#ifndef ARDUINO_BEARSSL_NO_ECCX08
   }
+#endif
+
   br_ssl_engine_inject_entropy(&_sc.eng, entropy, sizeof(entropy));
 
   // add custom ECDSA vfry and EC sign
   br_ssl_engine_set_ecdsa(&_sc.eng, _ecVrfy);
   br_x509_minimal_set_ecdsa(&_xc, br_ssl_engine_get_ec(&_sc.eng), br_ssl_engine_get_ecdsa(&_sc.eng));
+  br_x509_minimal_set_rsa(&_xc, br_ssl_engine_get_rsavrfy(&_sc.eng));
 
   // enable client auth
-  if (_ecCert.data_len && _ecKey.xlen) {
-    br_ssl_client_set_single_ec(&_sc, &_ecCert, 1, &_ecKey, BR_KEYTYPE_KEYX | BR_KEYTYPE_SIGN, BR_KEYTYPE_EC, br_ec_get_default(), _ecSign);
+  if (_keyType == BR_KEYTYPE_EC) {
+    if (_ecCert.data_len && _ecKey.xlen) {
+      br_ssl_client_set_single_ec(&_sc, &_ecCert, 1, &_ecKey, BR_KEYTYPE_KEYX | BR_KEYTYPE_SIGN, BR_KEYTYPE_EC, br_ec_get_default(), _ecSign);
+    }
+  } else if (_keyType == BR_KEYTYPE_RSA) {
+    br_ssl_client_set_single_rsa(&_sc, &_clientCert, 1, &_rsaKey, br_rsa_pkcs1_sign_get_default());
   }
 
   // set the hostname used for SNI
@@ -319,7 +375,6 @@ int BearSSLClient::connectSSL(const char* host)
   br_sslio_init(&_ioc, &_sc.eng, BearSSLClient::clientRead, _client, BearSSLClient::clientWrite, _client);
 
   br_sslio_flush(&_ioc);
-
   while (1) {
     unsigned state = br_ssl_engine_current_state(&_sc.eng);
 
@@ -399,8 +454,54 @@ int BearSSLClient::clientWrite(void *ctx, const unsigned char *buf, size_t len)
 
 void BearSSLClient::clientAppendCert(void *ctx, const void *data, size_t len)
 {
-  BearSSLClient* c = (BearSSLClient*)ctx;
+  br_x509_certificate* c = (br_x509_certificate*)ctx;
 
-  memcpy(&c->_ecCert.data[c->_ecCert.data_len], data, len);
-  c->_ecCert.data_len += len;
+  memcpy(&c->data[c->data_len], data, len);
+  c->data_len += len;
+}
+
+int BearSSLClient::decodePem(const char cert_in[], br_x509_certificate* cert_out)
+{
+  // try to decode the cert
+  br_pem_decoder_context pemDecoder;
+
+  size_t certLen = strlen(cert_in);
+
+  // free old data
+  // if (_ecCertDynamic && cert_out->data) {
+  //   free(cert_out->data);
+  //   cert_out->data = NULL;
+  // }
+  
+  // assume the decoded cert is 3/4 the length of the input
+  cert_out->data = (unsigned char*)malloc(((certLen * 3) + 3) / 4);
+  cert_out->data_len = 0;
+
+  br_pem_decoder_init(&pemDecoder);
+
+  while (certLen) {
+    size_t len = br_pem_decoder_push(&pemDecoder, cert_in, certLen);
+
+    cert_in += len;
+    certLen -= len;
+
+    switch (br_pem_decoder_event(&pemDecoder)) {
+      case BR_PEM_BEGIN_OBJ:
+        br_pem_decoder_setdest(&pemDecoder, BearSSLClient::clientAppendCert, cert_out);
+        break;
+
+      case BR_PEM_END_OBJ:
+        if (cert_out->data_len) {
+          // done
+          return 0;
+        }
+        break;
+
+      case BR_PEM_ERROR:
+        // failure
+        free(cert_out->data);
+        return -1;
+    }
+  }
+  return -1;
 }

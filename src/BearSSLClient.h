@@ -79,6 +79,9 @@ public:
   void setEccSlot(int ecc508KeySlot, const byte cert[], int certLength);
   void setEccSlot(int ecc508KeySlot, const char cert[]);
 
+  void setClientCertPem(const char cert[]);
+  void setClientKeyPem(const char cert[]);
+
   int errorCode();
 
 private:
@@ -86,6 +89,7 @@ private:
   static int clientRead(void *ctx, unsigned char *buf, size_t len);
   static int clientWrite(void *ctx, const unsigned char *buf, size_t len);
   static void clientAppendCert(void *ctx, const void *data, size_t len);
+  int decodePem(const char cert_in[], br_x509_certificate* cert_out);
 
 private:
   Client* _client;
@@ -97,8 +101,11 @@ private:
   br_ecdsa_vrfy _ecVrfy;
   br_ecdsa_sign _ecSign;
 
+  unsigned int _keyType;
   br_ec_private_key _ecKey;
   br_x509_certificate _ecCert;
+  br_x509_certificate _clientCert;
+  br_rsa_private_key _rsaKey;
   bool _ecCertDynamic;
 
   br_ssl_client_context _sc;
